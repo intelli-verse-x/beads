@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/policy"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -165,6 +167,20 @@ create, update, show, or close operation).`,
 					fmt.Fprintf(os.Stderr, "cannot close %s: blocked by open issues %v (use --force to override)\n", id, blockers)
 					continue
 				}
+			}
+
+			// Close-policy gate (.beads/close-policy.yaml). Refuses to close
+			// when required metadata for the issue's labels/type is missing.
+			// --force bypasses the gate but writes a policy_bypass audit row
+			// so the override is visible in Dolt history.
+			if violation, err := evaluateClosePolicy(activeStore, ctx, id, issue, dbPath); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not evaluate close policy for %s: %v\n", id, err)
+			} else if violation != nil {
+				if !force {
+					fmt.Fprintf(os.Stderr, "cannot close %s: %s\n", id, violation.Error())
+					continue
+				}
+				audit.LogFieldChange(id, "policy_bypass", "", violationFingerprint(violation), actor, reason)
 			}
 
 			if err := activeStore.CloseIssue(ctx, id, reason, actor, session); err != nil {
@@ -556,6 +572,70 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 		return nil, func() {}, fmt.Errorf("resolving ID %s: no issue found matching %q", id, id)
 	}
 	return results, cleanup, nil
+}
+
+// evaluateClosePolicy loads .beads/close-policy.yaml (if present) and
+// returns any violation for `id`. The lookup uses resolveCommandBeadsDir to
+// stay aligned with the active store the close is targeting, so routed
+// closes evaluate against the policy stored in the routed rig's .beads/.
+//
+// When the issue argument is nil (close-by-id where we never fetched the
+// row), we look it up from activeStore — the bd close path normally already
+// loaded `issue`, so this is a defensive fallback.
+//
+// Returns (nil, ErrNoPolicy-wrapped-as-nil) when no policy file exists; the
+// gate is silent in that case so existing users see no behavior change.
+func evaluateClosePolicy(activeStore storage.DoltStorage, ctx context.Context, id string, issue *types.Issue, currentDBPath string) (*policy.Violation, error) {
+	beadsDir := resolveCommandBeadsDir(currentDBPath)
+	if beadsDir == "" {
+		return nil, nil
+	}
+	p, err := policy.LoadFromBeadsDir(beadsDir)
+	if err != nil {
+		if errors.Is(err, policy.ErrNoPolicy) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if p == nil || len(p.Rules) == 0 {
+		return nil, nil
+	}
+	if issue == nil {
+		fetched, ferr := activeStore.GetIssue(ctx, id)
+		if ferr != nil || fetched == nil {
+			return nil, nil
+		}
+		issue = fetched
+	}
+	pi := policy.Issue{
+		ID:       issue.ID,
+		Type:     string(issue.IssueType),
+		Labels:   append([]string(nil), issue.Labels...),
+		Metadata: issue.Metadata,
+	}
+	return p.Evaluate(pi), nil
+}
+
+// violationFingerprint flattens the rule names from a Violation into a
+// single string suitable for the audit log's newValue column. Format:
+// "rule1,rule2" — easy to grep, stable across runs.
+func violationFingerprint(v *policy.Violation) string {
+	if v == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(v.Reasons))
+	for _, r := range v.Reasons {
+		// Reasons are of the form `rule "name": ...`; pull the quoted name out
+		// so the audit row stays short and machine-readable.
+		if start := strings.Index(r, `"`); start >= 0 {
+			if end := strings.Index(r[start+1:], `"`); end > 0 {
+				parts = append(parts, r[start+1:start+1+end])
+				continue
+			}
+		}
+		parts = append(parts, r)
+	}
+	return strings.Join(parts, ",")
 }
 
 // countEpicOpenChildren returns the number of open (non-closed) children for an epic.

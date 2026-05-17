@@ -1,0 +1,45 @@
+# Example bd close-policy file.
+#
+# Drop this into `.beads/close-policy.yaml` next to config.yaml. `bd close`
+# refuses to close a bead that matches one of these rules unless the
+# required metadata keys are present. `--force` bypasses the gate and
+# writes a `policy_bypass` row to the audit log so the override is visible
+# in Dolt history.
+#
+# Each rule has:
+#   - name           : human-readable label that shows up in the violation
+#                      message and the audit log
+#   - when           : match condition; all sub-fields are ANDed together
+#       labels_all       : list of labels the issue must carry
+#       labels_any       : list of labels of which the issue must carry one
+#       exclude_labels   : list of labels that, if present, skip the rule
+#       issue_types      : list of issue types (task, epic, bug, ...) to gate
+#       metadata_keys    : list of top-level metadata keys that must be
+#                          present (non-null, non-empty-string) for the rule
+#                          to apply. Useful to scope a rule to "only beads
+#                          that already declared a repo" etc.
+#   - require_one_of : at least one of these top-level metadata keys must be
+#                      present (non-null, non-empty-string) at close time
+#   - require_all    : every one of these top-level metadata keys must be
+#                      present at close time
+#
+# Reference: internal/policy/close_policy.go for the source of truth.
+
+rules:
+  # Backlinks playbook batch: every closed bead must point at the
+  # deliverable. Either the published playbook path on disk, or the PR
+  # URL once a playbook is opened against the repo.
+  - name: backlinks-need-playbook
+    when:
+      labels_any: [backlinks-2026-05]
+    require_one_of: [playbook_path, pr_url]
+
+  # SEO/GEO certification batch: every bead routed at a real repo must
+  # close with a PR url. Use `no_repo_reason` for the (rare) beads that
+  # legitimately do not need a PR — those go through the same gate but
+  # leave an explicit audit trail explaining why.
+  - name: cert-needs-pr
+    when:
+      labels_all: [cert-2026-05]
+      metadata_keys: [repo]
+    require_one_of: [pr_url, no_repo_reason]
