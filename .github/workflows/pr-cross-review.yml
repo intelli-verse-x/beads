@@ -29,7 +29,7 @@
 #
 # Optional repo variables.
 #   LITELLM_BASE_URL       Default: https://litellm.intelli-verse-x.ai
-#   CROSS_REVIEW_MODEL     Default: openai/o4-mini
+#   CROSS_REVIEW_MODEL     Default: o3
 #   CROSS_REVIEW_SKIP_PATHS  newline-separated glob list; matching diffs
 #                          are dropped from the prompt to keep the call
 #                          under provider context limits.
@@ -97,7 +97,7 @@ jobs:
         env:
           LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'https://litellm.intelli-verse-x.ai' }}
           LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
-          CROSS_REVIEW_MODEL: ${{ vars.CROSS_REVIEW_MODEL || 'openai/o4-mini' }}
+          CROSS_REVIEW_MODEL: ${{ vars.CROSS_REVIEW_MODEL || 'o3' }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
