@@ -1,0 +1,129 @@
+# Cross-provider PR review.
+#
+# Why this exists. The 2026 architecture critique flagged that
+# every reviewer in this stack — auditor, seo/geo/content/qa specialists,
+# Refinery, Mayor, Deacon, Witness — is Claude. A reviewer that runs on
+# the same provider as the author cannot catch "confidently wrong code
+# that passes tests" (APEX-Agents measured 24% first-pass success);
+# OpenAI's codex-plugin-cc in April 2026 was the productisation of that
+# observation. This workflow is the minimum viable cross-provider
+# adversarial review for repos in the intelli-verse-x org:
+#
+#   PR opened (Claude-authored) -> this Action calls OpenAI o4/o5 via
+#   LiteLLM with the diff -> posts an APPROVE or REQUEST_CHANGES review.
+#
+# How it works.
+#   1. Triggered on pull_request opened/synchronize/reopened.
+#   2. Pulls the PR diff (up to 200 KB).
+#   3. POSTs to ${LITELLM_BASE_URL}/v1/chat/completions, OpenAI-compatible
+#      JSON shape. LiteLLM proxies to whichever model is configured
+#      (defaults below assume an o-series mapping).
+#   4. Parses the response, posts a PR review with:
+#        - "APPROVE"          when the reviewer is satisfied
+#        - "REQUEST_CHANGES"  when it finds at least one substantive issue
+#        - "COMMENT"          when neither path applies (fallback)
+#
+# Required secrets (org-level recommended).
+#   LITELLM_API_KEY        Bearer token for the LiteLLM gateway.
+#   (LITELLM_BASE_URL is a repo variable with a sensible default below.)
+#
+# Optional repo variables.
+#   LITELLM_BASE_URL       Default: https://litellm.intelli-verse-x.ai
+#   CROSS_REVIEW_MODEL     Default: openai/o4-mini
+#   CROSS_REVIEW_SKIP_PATHS  newline-separated glob list; matching diffs
+#                          are dropped from the prompt to keep the call
+#                          under provider context limits.
+#
+# Failure mode. If the LiteLLM call errors or the response can't be
+# parsed, the workflow leaves a COMMENT review describing the failure
+# but does NOT block the PR (this is adversarial review, not the only
+# gate). The Refinery still runs as before.
+
+name: pr-cross-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  cross-review:
+    if: github.event.pull_request.draft == false || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve PR metadata
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ github.event.pull_request.number || github.event.inputs.pr_number }}"
+          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          gh pr view "$PR_NUMBER" --json baseRefName,headRefName,title,body \
+            > pr.json
+          echo "base=$(jq -r '.baseRefName' pr.json)" >> "$GITHUB_OUTPUT"
+          echo "head=$(jq -r '.headRefName' pr.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Capture diff
+        id: diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh pr diff "${{ steps.pr.outputs.number }}" \
+            | head -c 200000 > pr.diff
+          echo "bytes=$(wc -c < pr.diff)" >> "$GITHUB_OUTPUT"
+          if [ ! -s pr.diff ]; then
+            echo "no diff — skipping cross-review"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Call cross-provider reviewer (LiteLLM)
+        if: steps.diff.outputs.skip != 'true'
+        id: review
+        env:
+          LITELLM_BASE_URL: ${{ vars.LITELLM_BASE_URL || 'https://litellm.intelli-verse-x.ai' }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          CROSS_REVIEW_MODEL: ${{ vars.CROSS_REVIEW_MODEL || 'openai/o4-mini' }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          python3 .github/workflows/pr_cross_review.py \
+            --diff pr.diff \
+            --title "$PR_TITLE" \
+            --base "${{ steps.pr.outputs.base }}" \
+            --head "${{ steps.pr.outputs.head }}" \
+            --output review.json
+          echo "decision=$(jq -r '.decision' review.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Post review
+        if: steps.diff.outputs.skip != 'true' && steps.review.outputs.decision != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          DECISION="${{ steps.review.outputs.decision }}"
+          BODY=$(jq -r '.body' review.json)
+          EVENT="COMMENT"
+          case "$DECISION" in
+            APPROVE)         EVENT="APPROVE" ;;
+            REQUEST_CHANGES) EVENT="REQUEST_CHANGES" ;;
+          esac
+          # Post the review. Use --body-file so multi-line body survives shell.
+          jq -r '.body' review.json > review-body.md
+          gh pr review "${{ steps.pr.outputs.number }}" \
+            --"$(echo "$EVENT" | tr '[:upper:]' '[:lower:]' | tr '_' '-')" \
+            --body-file review-body.md
