@@ -12,3 +12,4 @@ cmd/bd/init.go              @gastownhall/beads-maintainers
 cmd/bd/init_*.go            @gastownhall/beads-maintainers
 cmd/bd/init_safety*.go      @gastownhall/beads-maintainers
 docs/adr/0002-init-safety-invariants.md  @gastownhall/beads-maintainers
+* @intelli-verse-x-health-tech
