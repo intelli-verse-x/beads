@@ -131,6 +131,7 @@ bd_test
 .beads/*
 !.beads/formulas/
 !.beads/formulas/**
+!.beads/close-policy.yaml
 .opencode/
 
 # Beads / Dolt files (added by bd init)
@@ -138,3 +139,5 @@ bd_test
 
 # Beads / Dolt files (added by bd init)
 .beads/proxieddb/
+config.bat
+node_modules

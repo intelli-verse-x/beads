@@ -1,0 +1,33 @@
+# Close-Policy: Enforcement gates for required metadata at close time.
+#
+# Motivation: Closing a bead is the moment when downstream consumers (Refinery,
+# Witness, Mayor, follow-up agents) trust that the issue is done AND that the
+# deliverable is attached. Today nothing enforces the latter — agents skip the
+# metadata step silently. This policy adds a fail-closed gate.
+#
+# See: internal/policy/close_policy.go for rule semantics.
+
+rules:
+  # Cert beads with a declared repo must provide proof of work: either a
+  # pr_url (the PR that implemented the change) or a no_repo_reason (why
+  # no PR exists — e.g., "external service", "manual process", "docs-only").
+  - name: cert-beads-need-proof-of-work
+    when:
+      labels_all: [cert-2026-05]
+      metadata_keys: [repo]
+    require_one_of: [pr_url, no_repo_reason]
+
+  # Backlinks beads with a declared playbook_path or workflow require
+  # proof of implementation — either a pr_url or a playbook_verified flag.
+  - name: backlinks-need-verification
+    when:
+      labels_any: [backlinks-2026-05]
+      exclude_labels: [archive]
+    require_one_of: [pr_url, playbook_verified]
+
+  # All deployments must declare a deploy_url and status for post-close audits.
+  - name: deployments-need-status
+    when:
+      labels_all: [deploy]
+      exclude_labels: [draft]
+    require_all: [deploy_url, status]
